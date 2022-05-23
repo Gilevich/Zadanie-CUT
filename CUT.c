@@ -4,9 +4,12 @@
 #include <pthread.h>
 #include <semaphore.h>
 #include <unistd.h>
+#include <signal.h>
 
 #define MAX_NUM_CPU 10
-#define TIME_DIFF 1 // seconds
+#define TIME_DIFF 1 // 1 second
+
+void *memset(void *s, int c, size_t n);
 
 typedef struct cpu {
     char cpuname[100];
@@ -21,7 +24,7 @@ typedef struct cpu {
 }CPUStruct;
 
 double result[MAX_NUM_CPU];
-CPUStruct (*cpu_stat)[MAX_NUM_CPU], (*cpu_stat_prev)[MAX_NUM_CPU];
+CPUStruct **cpu_stat, **cpu_stat_prev;
 int numCPU; // numbers CPU
 
 pthread_t reader_thread;
@@ -32,6 +35,12 @@ sem_t SemAnalyzer;
 sem_t SemReader;
 sem_t SemPrinter;
 
+volatile sig_atomic_t done = 0;
+ 
+void term()
+{
+    done = 1;
+}
 
 void skip_lines(FILE *f, int num_lines_skip)
 {
@@ -46,7 +55,7 @@ void skip_lines(FILE *f, int num_lines_skip)
 
 void *reader()
 {
-    while(1)
+    while(!done)
     {
         sem_wait(&SemReader);
         pthread_mutex_lock(&mutex);
@@ -74,11 +83,13 @@ void *reader()
         pthread_mutex_unlock(&mutex);
         sem_post(&SemAnalyzer);
     }
+    printf("Reader thread completed\n");
+    pthread_exit(NULL);
 }
 
 void *analyzer()
 {
-    while(1)
+    while(!done)
     {
         sem_wait(&SemAnalyzer);
         pthread_mutex_lock(&mutex);
@@ -94,10 +105,8 @@ void *analyzer()
             int NonIdle = cpu_stat[i]->t_user + cpu_stat[i]->t_nice + cpu_stat[i]->t_system + \
                         + cpu_stat[i]->t_irq + cpu_stat[i]->t_softirq + cpu_stat[i]->t_steal;
             
-
             int PrevTotal = PrevIdle + PrevNonIdle;
             int Total = Idle + NonIdle;
-
 
             double totald = (double)Total - (double)PrevTotal;
             double idled = (double)Idle - (double)PrevIdle;
@@ -107,32 +116,55 @@ void *analyzer()
         pthread_mutex_unlock(&mutex);
         sem_post(&SemPrinter);
     }
+    printf("Analyzer thread completed.\n");
+    pthread_exit(NULL);
 }
 
 void *printer()
 {
-    while(1)
+    while(!done)
     {
         sem_wait(&SemPrinter);
-        for(int i = 0; i < numCPU; i++)   
-            printf("CPU%d usage = %lf%%\n",i, result[i]);
+        double resultCPU = 0;
+        for(int i = 0; i < numCPU; i++)
+        {
+            resultCPU += result[i];
+            printf("Core%d usage = %lf%%\n",i, result[i]);
+        }   
+        printf("Average CPU usage = %lf%%\n",resultCPU);
         printf("\n");
         sem_post(&SemReader);
-    } 
-    return NULL;
+    }
+    printf("Printer thread completed\n"); 
+    pthread_exit(NULL);
 }
 
 int main()
 {
-    cpu_stat = malloc(sizeof(CPUStruct) * MAX_NUM_CPU);
-    cpu_stat_prev = malloc(sizeof(CPUStruct) * MAX_NUM_CPU);
+    cpu_stat = malloc(sizeof(CPUStruct *) * MAX_NUM_CPU);
+    cpu_stat_prev = malloc(sizeof(CPUStruct *) * MAX_NUM_CPU);
+    for (int i = 0; i < MAX_NUM_CPU; i++)
+    {
+        cpu_stat[i] = malloc(sizeof(CPUStruct));
+        cpu_stat_prev[i] = malloc(sizeof(CPUStruct));
+    }
+    
+    struct sigaction action;
+    memset(&action, 0, sizeof(struct sigaction));
+    action.sa_handler = term;
+    sigaction(SIGTERM, &action, NULL);
+
     numCPU = sysconf(_SC_NPROCESSORS_ONLN);
     printf("Number of cores in the processor: %d\n", numCPU);
+    int ProcID = getpid(); // for kill PID
+    printf("Process ID: %d\n", ProcID);
     printf("\n");
+
     pthread_mutex_init(&mutex, NULL);
     sem_init(&SemReader,0,1);
     sem_init(&SemAnalyzer,0,0);
     sem_init(&SemPrinter,0,0);
+
     if (pthread_create(&reader_thread, NULL, &reader, NULL) != 0){
         perror("Failed to create reader thread");
     }
@@ -156,9 +188,20 @@ int main()
     if (pthread_join(printer_thread, NULL) != 0){
         perror("Failed to join printer thread");
     }
+
+    for(int i = 0; i < MAX_NUM_CPU; i++)
+    {
+        free(cpu_stat[i]);
+        free(cpu_stat_prev[i]);
+    }
+    free(cpu_stat);
+    free(cpu_stat_prev);
+
     sem_destroy(&SemReader);
     sem_destroy(&SemAnalyzer);
     sem_destroy(&SemPrinter);
     pthread_mutex_destroy(&mutex);
+
+    printf("Program completed \n");
     return 0;
 }
