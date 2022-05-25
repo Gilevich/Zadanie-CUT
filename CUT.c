@@ -131,7 +131,7 @@ void *printer()
             resultCPU += result[i];
             printf("Core%d usage = %lf%%\n",i, result[i]);
         }   
-        printf("Average CPU usage = %lf%%\n",resultCPU);
+        printf("Average CPU usage = %lf%%\n",resultCPU/numCPU);
         printf("\n");
         sem_post(&SemReader);
     }
